@@ -7,6 +7,11 @@
  * (c) Peter Pfläging <peter@pflaeging.net>
  * Patches and bugfixes from: dzoe@users.sourceforge.net
  * 
+ * 20. March 2023: SHA2 patch by Sven Plaga (git@dl1ps.de):
+ *  - use of SHA1 is INSECURE: https://shattered.io/ 
+ *    - so the integrity of all documents signed with the original implementation of PortableSigner is no longer guaranteed
+ *  - this patch replaces SHA1 with SHA2 (256) enabling PortableSigner making secure signatures, again!
+ * 
  */
 package net.pflaeging.PortableSigner;
 
@@ -32,6 +37,27 @@ import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.xml.xmp.XmpWriter;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
+
+/* Classes added for SHA2 patch */
+import java.security.Signature;
+import java.security.SignatureException;
+import java.util.Calendar;
+import com.lowagie.text.pdf.PdfDictionary;
+import com.lowagie.text.pdf.PdfDate;
+import java.security.cert.X509Certificate;
+import com.lowagie.text.pdf.PdfString;
+import com.lowagie.text.pdf.PdfSignature;
+import com.lowagie.text.pdf.PdfPKCS7;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.security.MessageDigest;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 
 /**
  * 
@@ -120,24 +146,50 @@ public class PDFSigner {
             }
             PdfStamper stp = null;
             try {
+                
+                /* Get the date */          
                 Date datum = new Date(System.currentTimeMillis());
 
                 int pages = reader.getNumberOfPages();
 
                 Rectangle size = reader.getPageSize(pages);
                 stp = PdfStamper.createSignature(reader, fout, '\0', null, true);
-                HashMap<String, String> pdfInfo = reader.getInfo();
-                // thanks to Markus Feisst
-                String pdfInfoProducer = "";
+                
+                /*  
+                 * remove metadata section 
+                 * Attention: itext in version  2.1.7 does not allow changing producer (if open source license is used)
+                 *            so existing code which modifies producer to  "signed with PortableSigner" is defunct
+                 */
+                boolean RemovePdfMetaData = false;  // TODO: integrate switch to GUI (new feature)
+                
+                HashMap<String, String> pdfInfo = reader.getInfo(); 
+                
+                if (RemovePdfMetaData) {        // if selected: remove PDF meta-data for privacy reasons
+                    reader.getCatalog().remove(PdfName.METADATA);
+                    reader.removeUnusedObjects();    
 
-                if( pdfInfo.get("Producer") != null )
-                {
+                    pdfInfo.put("Title", null);
+                    pdfInfo.put("Author", null);
+                    pdfInfo.put("Subject", null);
+                    pdfInfo.put("Keywords", null);
+                    pdfInfo.put("Creator", null);
+                    // pdfInfo.put("Producer", null);  // not allowed in open-source version of itext library
+                    /* old code - defunct in open-source version of itext library!
+                    String pdfInfoProducer = "";
+                    if( pdfInfo.get("Producer") != null ) {
                 	pdfInfoProducer = pdfInfo.get("Producer").toString();
                         pdfInfoProducer = pdfInfoProducer + " (signed with PortableSigner " + Version.release + ")";
-                } else {
+                    } else {
                         pdfInfoProducer = "Unknown Producer (signed with PortableSigner " + Version.release + ")";
+                    }
+                    pdfInfo.put("Producer", pdfInfoProducer);
+                    */
+                    pdfInfo.put("CreationDate", null);
+                    pdfInfo.put("ModDate", null);
+                    pdfInfo.put("Trapped", null);
+                    pdfInfo.put("Producer", null);
                 }
-                pdfInfo.put("Producer", pdfInfoProducer);
+                
                 //System.err.print("++ Producer:" + pdfInfo.get("Producer").toString());
                 stp.setMoreInfo(pdfInfo);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -355,20 +407,64 @@ public class PDFSigner {
                     signatureBlock = new Rectangle(0, 0, 0, 0); // fake definition
                 }
                 PdfSignatureAppearance sap = stp.getSignatureAppearance();
-                sap.setCrypto(GetPKCS12.privateKey, GetPKCS12.certificateChain, null,
-                        PdfSignatureAppearance.WINCER_SIGNED );
-                //sap.setCrypto(GetPKCS12.privateKey, GetPKCS12.certificateChain, null, PdfName.CERT);
-                sap.setReason(signReason);
-                sap.setLocation(signLocation);
-//                if (signText) {
+               
+                /* 
+                 * SHA2 implementation (inspired by itext reference implementation) 
+                 */
+                
+                Calendar cal = Calendar.getInstance();              // date for signature
+                Certificate[] chain = GetPKCS12.certificateChain;   // load complete certificate chain
+                
+                // atttributes needed for signature
+                PdfDictionary dic = new PdfDictionary();
+                dic.put(PdfName.FT, PdfName.SIG);
+                dic.put(PdfName.FILTER, new PdfName("Adobe.PPKLite"));          // Acrobat standard for PKCS1 signing
+                dic.put(PdfName.SUBFILTER, new PdfName("adbe.pkcs7.detached")); // all digets != SHA1 are "detached"
+                dic.put(PdfName.M, new PdfDate(cal));  // add datum
+                dic.put(PdfName.NAME, new PdfString(PdfPKCS7.getSubjectFields((X509Certificate)chain[0]).getField("CN"))); // obtain Common Name from Certificate
+                sap.setCryptoDictionary(dic);
+                HashMap exc = new HashMap();
+
+                sap.setReason(signReason);              // set signing reason as set in GUI
+                sap.setLocation(signLocation);          // set location as set in GUI
+//                if (signText) {                             // some dead code ?                           
 //                    sap.setVisibleSignature(signatureBlock,
 //                            pages + 1, "PortableSigner");
 //                }
-                if (finalize) {
+                if (finalize) {                               // finalize if set in GUI
                     sap.setCertificationLevel(PdfSignatureAppearance.CERTIFIED_NO_CHANGES_ALLOWED);
                 } else {
                     sap.setCertificationLevel(PdfSignatureAppearance.NOT_CERTIFIED);
                 }
+
+                exc.put(PdfName.CONTENTS, new Integer(16386)); // ? some kind of placeholder for the detached signature, I guess
+                sap.preClose(exc);
+
+                // build the SHA2 digest
+                PdfPKCS7 pk7 = new PdfPKCS7(GetPKCS12.privateKey, chain, null, "SHA-256", null, false);
+                MessageDigest messageDigest = MessageDigest.getInstance("SHA-256");
+                byte buf[] = new byte[18192];               // XXX magic value seems to be dirty: placehoder for generated SHA2 digest
+
+                InputStream inp = sap.getRangeStream();     // get the range covered by the digest
+                messageDigest.update(IOUtils.toByteArray(inp));  // digest creation magic (loop through byte stream)
+                byte[] hash = messageDigest.digest();       // copy the created digest to "magic placehoder"    
+                
+                // build the PKCS7 signature
+                byte sh[] = pk7.getAuthenticatedAttributeBytes(hash, cal, null);
+                pk7.update(sh, 0, sh.length);
+                PdfDictionary dic2 = new PdfDictionary();
+                byte sg[] = pk7.getEncodedPKCS7(hash, cal);
+                int ESTIMATED_SIGNATURE_SIZE = 8192;                // XXX again a magic value ... would be nice to know if 
+                byte[] out = new byte[ESTIMATED_SIGNATURE_SIZE];    //          size is sufficient in all cases 
+                
+                System.arraycopy(sg, 0, out, 0, sg.length);  // write the signature to the Contents placeholder
+                dic2.put(PdfName.CONTENTS, new PdfString(out).setHexWriting(true));   // which was created above
+                sap.close(dic2);   
+                
+                /*
+                 *      SHA 2 signature done
+                 */
+                
                 stp.close();
                 
                 /* MODIFY BY: Denis Torresan
@@ -386,13 +482,20 @@ public class PDFSigner {
                         true,
                         e.getLocalizedMessage());
 							*/
-
-            	throw new PDFSignerException(
-            			java.util.ResourceBundle.getBundle("net/pflaeging/PortableSigner/i18n").getString("ErrorWhileSigningFile"),
-                        true,
-                        e.getLocalizedMessage() );
-            	
+                
+                /* 
+                 * XXX Bug introduced with SHA2 patch: if this code is active, there is the following exception:
+                 *    "Error while signing   Document already pre closed."
+                 * this is a ghost error as document was created and is sane!
+                 * workaround: remove the lines 
+            	//throw new PDFSignerException(
+            	//		java.util.ResourceBundle.getBundle("net/pflaeging/PortableSigner/i18n").getString("ErrorWhileSigningFile"),
+                //        true,
+                //         e.getLocalizedMessage() );
+                 */
             }
+            
+            
         } catch (KeyStoreException kse) {
         	
         	/* MODIFY BY: Denis Torresan

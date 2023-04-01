@@ -33,7 +33,8 @@ public class Main extends javax.swing.JFrame {
     public String contributors = "Contributors:\n" +
             "Bogdan Drozdowski, " +
             "Alessio Caiazza, " +
-            "Dominik Joe Pant\u016f\u010dek" +
+            "Dominik Joe Pant\u016f\u010dek,\n" +
+            "Sven Plaga (SHA2)\n" +
             "\n\nTranslations:\n" +
             "PL: Bogdan Drozdowski\n" +
             "IT: Alessio Caiazza\n" +
